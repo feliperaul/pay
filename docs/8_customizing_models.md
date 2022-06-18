@@ -31,6 +31,28 @@ Rails.application.config.to_prepare do
 end
 ```
 
+If you want to override an existing Pay method, you can `prepend` your concern instead:
+
+```ruby
+# app/models/concerns/customer_extensions.rb
+module CustomerExtensions
+  extend ActiveSupport::Concern
+
+  def on_trial?(name: Pay.default_product_name, plan: nil)
+    # custom overriden logic; you can even call `super` to access Pay's own
+    # method.
+  end
+  
+end
+
+# config/initializers/pay.rb
+
+# Re-prepend the ChargeExtensions every time Rails reloads
+Rails.application.config.to_prepare do
+  Pay::Charge.prepend ChargeExtensions
+end
+```
+
 ## Next
 
 See [Testing](9_testing.md)

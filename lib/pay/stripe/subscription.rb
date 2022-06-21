@@ -28,72 +28,77 @@ module Pay
         object ||= ::Stripe::Subscription.retrieve({id: subscription_id}.merge(expand_options), {stripe_account: stripe_account}.compact)
 
         pay_customer = Pay::Customer.find_by(processor: :stripe, processor_id: object.customer)
+
         return unless pay_customer
 
-        attributes = {
-          application_fee_percent: object.application_fee_percent,
-          processor_plan: object.items.first.price.id,
-          quantity: object.items.first.try(:quantity) || 0,
-          status: object.status,
-          stripe_account: pay_customer.stripe_account,
-          metadata: object.metadata,
-          subscription_items: [],
-          metered: false,
-          pause_behavior: object.pause_collection&.behavior,
-          pause_resumes_at: (object.pause_collection&.resumes_at ? Time.at(object.pause_collection&.resumes_at) : nil)
-        }
+        pay_customer.with_lock do
 
-        # Subscriptions that have ended should have their trial ended at the
-        # same time if they were still on trial (if you cancel a
-        # subscription, your are cancelling your trial as well at the same
-        # instant). This avoids canceled subscriptions responding `true`
-        # to #on_trial? due to the `trial_ends_at` being left set in the
-        # future.
-        if object.trial_end
-          trial_ended_at = [object.ended_at, object.trial_end].compact.min
-          attributes[:trial_ends_at] = Time.at(trial_ended_at)
-        end
+          attributes = {
+            application_fee_percent: object.application_fee_percent,
+            processor_plan: object.items.first.price.id,
+            quantity: object.items.first.try(:quantity) || 0,
+            status: object.status,
+            stripe_account: pay_customer.stripe_account,
+            metadata: object.metadata,
+            subscription_items: [],
+            metered: false,
+            pause_behavior: object.pause_collection&.behavior,
+            pause_resumes_at: (object.pause_collection&.resumes_at ? Time.at(object.pause_collection&.resumes_at) : nil)
+          }
 
-        # Record subscription items to db
-        object.items.auto_paging_each do |subscription_item|
-          if !attributes[:metered] && (subscription_item.to_hash.dig(:price, :recurring, :usage_type) == "metered")
-            attributes[:metered] = true
+          # Subscriptions that have ended should have their trial ended at the
+          # same time if they were still on trial (if you cancel a
+          # subscription, your are cancelling your trial as well at the same
+          # instant). This avoids canceled subscriptions responding `true`
+          # to #on_trial? due to the `trial_ends_at` being left set in the
+          # future.
+          if object.trial_end
+            trial_ended_at = [object.ended_at, object.trial_end].compact.min
+            attributes[:trial_ends_at] = Time.at(trial_ended_at)
           end
 
-          attributes[:subscription_items] << subscription_item.to_hash.slice(:id, :price, :metadata, :quantity)
+          # Record subscription items to db
+          object.items.auto_paging_each do |subscription_item|
+            if !attributes[:metered] && (subscription_item.to_hash.dig(:price, :recurring, :usage_type) == "metered")
+              attributes[:metered] = true
+            end
+
+            attributes[:subscription_items] << subscription_item.to_hash.slice(:id, :price, :metadata, :quantity)
+          end
+
+          attributes[:ends_at] = if object.ended_at
+            # Fully cancelled subscription
+            Time.at(object.ended_at)
+          elsif object.cancel_at
+            # subscription cancelling in the future
+            Time.at(object.cancel_at)
+          elsif object.cancel_at_period_end
+            # Subscriptions cancelling in the future
+            Time.at(object.current_period_end)
+          end
+
+          # Update or create the subscription
+          pay_subscription = pay_customer.subscriptions.find_by(processor_id: object.id)
+          if pay_subscription
+            pay_subscription.update!(attributes)
+          else
+            # Allow setting the subscription name in metadata, otherwise use the default
+            name ||= object.metadata["pay_name"] || Pay.default_product_name
+
+            pay_subscription = pay_customer.subscriptions.create!(attributes.merge(name: name, processor_id: object.id))
+          end
+
+          # Cache the Stripe subscription on the Pay::Subscription that we return
+          pay_subscription.stripe_subscription = object
+
+          # Sync the latest charge if we already have it loaded (like during subscrbe), otherwise, let webhooks take care of creating it
+          if (charge = object.try(:latest_invoice).try(:charge)) && charge.try(:status) == "succeeded"
+            Pay::Stripe::Charge.sync(charge.id, object: charge)
+          end
+
+          pay_subscription
+
         end
-
-        attributes[:ends_at] = if object.ended_at
-          # Fully cancelled subscription
-          Time.at(object.ended_at)
-        elsif object.cancel_at
-          # subscription cancelling in the future
-          Time.at(object.cancel_at)
-        elsif object.cancel_at_period_end
-          # Subscriptions cancelling in the future
-          Time.at(object.current_period_end)
-        end
-
-        # Update or create the subscription
-        pay_subscription = pay_customer.subscriptions.find_by(processor_id: object.id)
-        if pay_subscription
-          pay_subscription.with_lock { pay_subscription.update!(attributes) }
-        else
-          # Allow setting the subscription name in metadata, otherwise use the default
-          name ||= object.metadata["pay_name"] || Pay.default_product_name
-
-          pay_subscription = pay_customer.subscriptions.create!(attributes.merge(name: name, processor_id: object.id))
-        end
-
-        # Cache the Stripe subscription on the Pay::Subscription that we return
-        pay_subscription.stripe_subscription = object
-
-        # Sync the latest charge if we already have it loaded (like during subscrbe), otherwise, let webhooks take care of creating it
-        if (charge = object.try(:latest_invoice).try(:charge)) && charge.try(:status) == "succeeded"
-          Pay::Stripe::Charge.sync(charge.id, object: charge)
-        end
-
-        pay_subscription
       rescue ActiveRecord::RecordInvalid
         try += 1
         if try <= retries

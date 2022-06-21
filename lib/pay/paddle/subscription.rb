@@ -34,32 +34,34 @@ module Pay
 
         return unless pay_customer
 
-        attributes = {
-          paddle_cancel_url: object.cancel_url,
-          paddle_update_url: object.update_url,
-          processor_plan: object.plan_id || object.subscription_plan_id,
-          quantity: object.quantity,
-          status: object.state || object.status
-        }
+        pay_customer.with_lock do
 
-        # If paused or delete while on trial, set ends_at to match
-        case attributes[:status]
-        when "trialing"
-          attributes[:trial_ends_at] = Time.zone.parse(object.next_bill_date)
-          attributes[:ends_at] = nil
-        when "paused", "deleted"
-          attributes[:trial_ends_at] = nil
-          attributes[:ends_at] = Time.zone.parse(object.next_bill_date)
-        end
+          attributes = {
+            paddle_cancel_url: object.cancel_url,
+            paddle_update_url: object.update_url,
+            processor_plan: object.plan_id || object.subscription_plan_id,
+            quantity: object.quantity,
+            status: object.state || object.status
+          }
 
-        # Update or create the subscription
-        if (pay_subscription = pay_customer.subscriptions.find_by(processor_id: object.subscription_id))
-          pay_subscription.with_lock do
-            pay_subscription.update!(attributes)
+          # If paused or delete while on trial, set ends_at to match
+          case attributes[:status]
+          when "trialing"
+            attributes[:trial_ends_at] = Time.zone.parse(object.next_bill_date)
+            attributes[:ends_at] = nil
+          when "paused", "deleted"
+            attributes[:trial_ends_at] = nil
+            attributes[:ends_at] = Time.zone.parse(object.next_bill_date)
           end
-          pay_subscription
-        else
-          pay_customer.subscriptions.create!(attributes.merge(name: name, processor_id: object.subscription_id))
+
+          # Update or create the subscription
+          if (pay_subscription = pay_customer.subscriptions.find_by(processor_id: object.subscription_id))
+              pay_subscription.update!(attributes)
+            pay_subscription
+          else
+            pay_customer.subscriptions.create!(attributes.merge(name: name, processor_id: object.subscription_id))
+          end
+          
         end
       end
 

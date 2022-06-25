@@ -4,7 +4,7 @@ module Pay
 
     # Associations
     belongs_to :customer
-    has_many :charges
+    has_many :charges, dependent: :destroy
 
     # Scopes
     scope :for_name, ->(name) { where(name: name) }

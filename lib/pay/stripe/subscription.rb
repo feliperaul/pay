@@ -32,7 +32,6 @@ module Pay
         return unless pay_customer
 
         pay_customer.with_lock do
-
           attributes = {
             application_fee_percent: object.application_fee_percent,
             processor_plan: object.items.first.price.id,
@@ -97,7 +96,6 @@ module Pay
           end
 
           pay_subscription
-
         end
       rescue ActiveRecord::RecordInvalid
         try += 1

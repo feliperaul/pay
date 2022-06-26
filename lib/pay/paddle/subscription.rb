@@ -35,7 +35,6 @@ module Pay
         return unless pay_customer
 
         pay_customer.with_lock do
-
           attributes = {
             paddle_cancel_url: object.cancel_url,
             paddle_update_url: object.update_url,
@@ -56,12 +55,11 @@ module Pay
 
           # Update or create the subscription
           if (pay_subscription = pay_customer.subscriptions.find_by(processor_id: object.subscription_id))
-              pay_subscription.update!(attributes)
+            pay_subscription.update!(attributes)
             pay_subscription
           else
             pay_customer.subscriptions.create!(attributes.merge(name: name, processor_id: object.subscription_id))
           end
-          
         end
       end
 
